@@ -19,8 +19,8 @@ def generate_launch_description():
 
     usb_port = LaunchConfiguration('usb_port', default='/dev/ttyACM0')
 
-    tb3_param_dir = LaunchConfiguration(
-        'tb3_param_dir',
+    eb_param_dir = LaunchConfiguration(
+        'eb_param_dir',
         default=os.path.join(
             get_package_share_directory('everybot_bringup'),
             'param',
@@ -54,8 +54,8 @@ def generate_launch_description():
             description='Connected USB port with OpenCR'),
 
         DeclareLaunchArgument(
-            'tb3_param_dir',
-            default_value=tb3_param_dir,
+            'eb_param_dir',
+            default_value=eb_param_dir,
             description='Full path to everybot parameter file to load'),
 
         IncludeLaunchDescription(
@@ -72,7 +72,7 @@ def generate_launch_description():
         Node(
             package='everybot_node',
             executable='everybot_ros',
-            parameters=[tb3_param_dir],
+            parameters=[eb_param_dir],
             arguments=['-i', usb_port],
             output='screen'),
     ])
