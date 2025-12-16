@@ -11,10 +11,9 @@ export class RobotModel extends THREE.Group {
         super();
         this.params = initialParams; // params 객체 참조
         this.bodyMat = new THREE.MeshStandardMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 });
-        this.robotBottom = null;
-        this.robotMiddle = null;
-        this.robotTop = null;
-        this.rgbCamera = null;
+        // 본체 파츠들만 담을 그룹을 따로 생성하여 자신(RobotModel)에게 추가
+        this.bodyGroup = new THREE.Group();
+        this.add(this.bodyGroup);
 
         this.updateBody(); // 초기 모델링
     }
@@ -24,7 +23,7 @@ export class RobotModel extends THREE.Group {
      */
     updateBody() {
         // 기존 매쉬 제거
-        this.clear(); // THREE.Group의 모든 자식 제거
+        this.bodyGroup.clear(); // THREE.Group의 모든 자식 제거
 
         const ROBOT_MAX_H = this.params.heightRobot;
         const H_MIDDLE = ROBOT_MAX_H - (ROBOT_GROUND_OFFSET + H_BOTTOM + GAP_H + H_TOP);
@@ -50,7 +49,7 @@ export class RobotModel extends THREE.Group {
         this.robotBottom = new THREE.Mesh(bottomGeo, this.bodyMat);
         this.robotBottom.position.y = Y_BOTTOM;
         this.robotBottom.castShadow = true;
-        this.add(this.robotBottom);
+        this.bodyGroup.add(this.robotBottom);
 
         // 2. 중간부
         const rM_T = rM + (rT - rM) * (H_MIDDLE / (H_MIDDLE + H_TOP));
@@ -58,14 +57,14 @@ export class RobotModel extends THREE.Group {
         this.robotMiddle = new THREE.Mesh(middleGeo, this.bodyMat);
         this.robotMiddle.position.y = Y_MIDDLE;
         this.robotMiddle.castShadow = true;
-        this.add(this.robotMiddle);
+        this.bodyGroup.add(this.robotMiddle);
 
         // 3. 상단부
         const topGeo = new THREE.CylinderGeometry(rT, rM_T, H_TOP, 32);
         this.robotTop = new THREE.Mesh(topGeo, this.bodyMat);
         this.robotTop.position.y = Y_TOP;
         this.robotTop.castShadow = true;
-        this.add(this.robotTop);
+        this.bodyGroup.add(this.robotTop);
 
         // 4. RGB 카메라 (센서가 아닌 본체 부속품)
         const rgbCameraGeo = new THREE.CylinderGeometry(0.01, 0.01, 0.03, 32);
@@ -76,6 +75,6 @@ export class RobotModel extends THREE.Group {
 
         this.rgbCamera.position.set(0, rgbCamY, rT + 0.001);
         this.rgbCamera.rotation.x = THREE.MathUtils.degToRad(180.0 - (90.0 - 25.0));
-        this.add(this.rgbCamera);
+        this.bodyGroup.add(this.rgbCamera);
     }
 }

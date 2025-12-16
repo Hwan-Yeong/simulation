@@ -111,9 +111,9 @@ export class RobotSimulator {
 
         this.sensors.push(this.tofA, this.ultra, this.tofB);
 
-        this.sensors.forEach(sensor => {
-            this.robotModel.add(sensor.pivot); // 로봇 그룹에 센서 피벗 추가
-            this.floorIntersectionGroup.add(sensor.floorIndicator); // 바닥 그룹에 인디케이터 추가
+        this.sensors.forEach((sensor, index) => {
+            this.robotModel.add(sensor.pivot);
+            this.floorIntersectionGroup.add(sensor.floorIndicator);
         });
     }
 

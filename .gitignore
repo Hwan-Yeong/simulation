@@ -52,3 +52,9 @@ CATKIN_IGNORE
 
 # VSCode
 .vscode
+
+###########################
+
+# Node.js
+node_modules/
+dist/
