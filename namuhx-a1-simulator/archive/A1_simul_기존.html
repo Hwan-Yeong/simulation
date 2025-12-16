@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>Namuhx A1 Sensor Simulator</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1a1a1a; color: white; font-family: sans-serif; }
+        #info { position: absolute; top: 10px; width: 100%; text-align: center; pointer-events: none; z-index: 10; text-shadow: 1px 1px 2px black; }
+        b { color: #00ffcc; }
+        /* [새 기능 2] 측정 결과 표시 스타일 */
+        #measurement-output {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 5px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            z-index: 50;
+        }
+        /* [새 기능 1] 분석 결과 표시 스타일 */
+        #analysis-output {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 5px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            z-index: 50;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+    <div id="info">
+        <h2>나무엑스 A1 센서 배치 시뮬레이터</h2>
+        <p>우측 상단 <b>Controls</b> 패널을 통해 센서 위치와 각도를 조절하세요.<br>
+        마우스 왼쪽: 회전 / 휠: 줌 / 오른쪽: 이동 / <b>바닥에 더블 클릭하여 거리 측정</b></p>
+    </div>
+    
+    <div id="analysis-output">분석 결과: 센서 설정 후 업데이트됩니다.</div>
+    <div id="measurement-output">측정 결과: 바닥을 더블 클릭하세요.</div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+
+        // 1. 씬 설정
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x222222);
+
+        // 안개 효과 (바닥 끝 자연스럽게)
+        scene.fog = new THREE.Fog(0x222222, 2, 5);
+
+        // 카메라
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 100);
+        camera.position.set(1.5, 1.0, 1.5);
+
+        // 렌더러
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.localClippingEnabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // 컨트롤 (마우스 회전)
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 0.34, 0); // 로봇 중심을 바라봄
+        controls.update();
+
+        // 조명
+        const ambientLight = new THREE.AmbientLight(0x404040, 2); // 부드러운 빛
+        scene.add(ambientLight);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+        dirLight.position.set(1, 2, 1);
+        dirLight.castShadow = true;
+        scene.add(dirLight);
+
+        // 2. 환경 구성 (바닥 그리드)
+        const gridHelper = new THREE.GridHelper(5, 50, 0x444444, 0x333333);
+        scene.add(gridHelper);
+        const axesHelper = new THREE.AxesHelper(0.5); // X:빨강, Y:초록(위), Z:파랑
+        scene.add(axesHelper);
+
+        // ============================================
+        // 3. 로봇 모델링 (단위: meter)
+        // ============================================
+        const ROBOT_MAX_H = 0.68; // 전체 높이 680mm
+        const GAP_H = 0.03;       // 하단부와 중간부 사이의 간격 30mm
+        const ROBOT_GROUND_OFFSET = 0.02; // 바닥으로부터 띄우는 높이 20mm
+
+        // 로봇 본체 파츠 그룹
+        const robotGroup = new THREE.Group();
+        const bodyMat = new THREE.MeshStandardMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 });
+
+        // 파트별 높이 (m)
+        const H_BOTTOM = 0.10; 
+        const H_TOP = 0.03;
+        const H_MIDDLE = 0.50; 
+
+        // 파트별 시작 Y 위치 (바닥으로부터의 중심점)
+        const Y_BOTTOM = ROBOT_GROUND_OFFSET + H_BOTTOM / 2; 
+        const Y_MIDDLE = ROBOT_GROUND_OFFSET + H_BOTTOM + GAP_H + (H_MIDDLE / 2); 
+        const Y_TOP = ROBOT_GROUND_OFFSET + H_BOTTOM + GAP_H + H_MIDDLE + (H_TOP / 2); 
+
+        // 파츠 매쉬를 저장할 변수
+        let robotBottom, robotMiddle, robotTop, rgbCamera;
+
+        // 로봇의 반지름은 GUI로 조절 가능하게 초기값 설정
+        const params = {
+            radiusBottom: 0.15,
+            radiusMiddle: 0.15,
+            radiusTop: 0.15,
+        };
+
+        /**
+        * 로봇 본체를 GUI 파라미터에 따라 업데이트하는 함수
+        * 하단, 중단, 상단 반지름을 사용하여 3개의 원뿔대 형태로 표현합니다.
+        */
+        function updateRobotBody() {
+            // 기존 매쉬 제거
+            if (robotBottom) robotGroup.remove(robotBottom);
+            if (robotMiddle) robotGroup.remove(robotMiddle);
+            if (robotTop) robotGroup.remove(robotTop);
+
+            const rB = params.radiusBottom;
+            const rM = params.radiusMiddle;
+            const rT = params.radiusTop;
+
+            // 1. 하단부 (Y 중심: 0.07m, 높이: 0.10m)
+            const rM_B = rB + (rM - rB) * (Y_BOTTOM / (ROBOT_MAX_H / 2));
+            const bottomGeo = new THREE.CylinderGeometry(rM_B, rB, H_BOTTOM, 32);
+            robotBottom = new THREE.Mesh(bottomGeo, bodyMat);
+            robotBottom.position.y = Y_BOTTOM;
+            robotBottom.castShadow = true;
+            robotGroup.add(robotBottom);
+
+            // 2. 중간부 (Y 중심: 0.40m, 높이: 0.50m)
+            const rM_T = rM + (rT - rM) * (H_MIDDLE / (H_MIDDLE + H_TOP));
+            const middleGeo = new THREE.CylinderGeometry(rM_T, rM_B, H_MIDDLE, 32);
+            robotMiddle = new THREE.Mesh(middleGeo, bodyMat);
+            robotMiddle.position.y = Y_MIDDLE;
+            robotMiddle.castShadow = true;
+            robotGroup.add(robotMiddle);
+
+            // 3. 상단부 (Y 중심: 0.665m, 높이: 0.03m)
+            const topGeo = new THREE.CylinderGeometry(rT, rM_T, H_TOP, 32);
+            robotTop = new THREE.Mesh(topGeo, bodyMat);
+            robotTop.position.y = Y_TOP;
+            robotTop.castShadow = true;
+            robotGroup.add(robotTop);
+        }
+
+        // 상부 rgb 카메라
+        const rgbCameraGeo = new THREE.CylinderGeometry(0.01, 0.01, 0.03, 32);
+        const rgbCameraMat = new THREE.MeshBasicMaterial({ color: 0x333333 });
+        rgbCamera = new THREE.Mesh(rgbCameraGeo, rgbCameraMat);
+        rgbCamera.position.set(0, 0.58 + ROBOT_GROUND_OFFSET, params.radiusTop + 0.001); 
+        rgbCamera.rotation.x = THREE.MathUtils.degToRad(180.0 - (90.0 - 25.0)); // 앞을 향하도록 90도 회전
+        robotGroup.add(rgbCamera);
+
+        scene.add(robotGroup);
+        updateRobotBody(); // 초기 로봇 모델링
+
+        // ============================================
+        // 4. 센서 생성 함수 (가시화)
+        // ============================================
+        // [새 기능 1] 교차 영역 가시화를 위한 그룹
+        const floorIntersectionGroup = new THREE.Group();
+        scene.add(floorIntersectionGroup);
+        // 클리핑 평면: Y=0 에서 Y+ 방향을 바라보는 평면을 기준으로 아래를 잘라냄
+        const clippingPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0.001);
+
+        function createSensorVisualization(color, name) {
+            // pivot 그룹을 로봇 그룹에 자식으로 추가하여 로봇 이동 시 함께 움직이게 합니다.
+            const pivot = new THREE.Group();
+
+            // 센서 본체 (작은 박스)
+            const sensorBox = new THREE.Mesh(
+                new THREE.BoxGeometry(0.04, 0.02, 0.02),
+                new THREE.MeshBasicMaterial({ color: color })
+            );
+            // 센서 위치: 중심에서 (0, 0, 0)
+            pivot.add(sensorBox);
+
+            // FoV 콘 (시야각)
+            const coneGeo = new THREE.ConeGeometry(1, 1, 32, 1, true);
+            coneGeo.rotateX(-Math.PI / 2);
+            coneGeo.translate(0, 0, 0.5);
+
+            const coneMat = new THREE.MeshBasicMaterial({
+                color: color,
+                transparent: true,
+                opacity: 0.3,
+                side: THREE.DoubleSide,
+                depthWrite: false,
+                // 클리핑 평면 적용
+                clippingPlanes: [clippingPlane],
+                clipShadows: true
+            });
+            const fovMesh = new THREE.Mesh(coneGeo, coneMat);
+            // 센서 박스 앞단에서 시작하도록 위치 조정
+            fovMesh.position.z = 0.02;
+            pivot.add(fovMesh);
+
+            scene.add(pivot);
+            
+            // [새 기능 1] 바닥 교차 영역 가시화 객체
+            const floorIndicator = new THREE.Mesh(
+                new THREE.CircleGeometry(0.1, 32), 
+                new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.5, side: THREE.DoubleSide })
+            );
+            floorIndicator.rotation.x = -Math.PI / 2; // 바닥에 수평
+            floorIndicator.position.y = 0.001;
+            floorIntersectionGroup.add(floorIndicator);
+
+            return { pivot, fovMesh, sensorBox, floorIndicator, name, color };
+        }
+
+        // 센서 객체 생성
+        const tofA = createSensorVisualization(0xff0000, "[Red] ToF Bottom"); 
+        const ultra = createSensorVisualization(0x00ff00, "[Green] Ultrasonic");   
+        const tofB = createSensorVisualization(0x0000ff, "[Blue] ToF Top");   
+
+        const sensors = [tofA, ultra, tofB]; // 분석을 위해 배열로 관리
+
+        // ============================================
+        // 5. GUI 설정 (실시간 제어) 
+        // ============================================
+        const gui = new GUI({ title: '센서 설정 (Controls)' });
+
+        // 초기 파라미터 데이터
+        Object.assign(params,
+            {
+                // 로봇 반지름 (m)
+                radiusBottom: 0.15,
+                radiusMiddle: 0.25,
+                radiusTop: 0.15,
+
+                // --- ToF A (Bottom) ---
+                tofA_x: -0.076,
+                tofA_y: 0.08,
+                tofA_z: 0.145,
+                tofA_yaw: -15,
+                tofA_pitch: -5,
+                tofA_fov: 45,
+                tofA_range: 1.5,
+                tofA_visible: true,
+
+                // --- Ultrasonic (하단 장애물) ---
+                ultra_x: 0,
+                ultra_y: 0.11,
+                ultra_z: 0.16,
+                ultra_yaw: 0,
+                ultra_pitch: -22.5,
+                ultra_fov: 45,
+                ultra_range: 0.7902,
+                ultra_visible: false,
+
+                // --- ToF B (Top) ---
+                tofB_x: 0.076,
+                tofB_y: 0.08,
+                tofB_z: 0.145,
+                tofB_yaw: 15,
+                tofB_pitch: -5,
+                tofB_fov: 45,
+                tofB_range: 1.5,
+                tofB_visible: true,
+            }
+        );
+
+        // [새 기능 1] 바닥 교차점 분석 및 가시화 함수 (내용은 동일)
+        function analyzeFloorIntersection(sensor, paramsKey) {
+            const yawRad = THREE.MathUtils.degToRad(params[`${paramsKey}_yaw`]);
+            const pitchRad = THREE.MathUtils.degToRad(params[`${paramsKey}_pitch`]);
+            const fovRad = THREE.MathUtils.degToRad(params[`${paramsKey}_fov`]);
+
+            // 센서 위치 (절대 좌표)
+            const sensorPos = new THREE.Vector3(params[`${paramsKey}_x`], params[`${paramsKey}_y`], params[`${paramsKey}_z`]);
+
+            // 센서의 절대 회전 적용
+            sensorPos.add(robotGroup.position);
+
+            // 센서가 바닥(Y=0)으로부터 떨어진 수직 높이
+            const sensorHeight = sensorPos.y; 
+
+            // Z축 (앞) 방향 벡터 (Yaw와 Pitch가 적용된 후)
+            const direction = new THREE.Vector3(0, 0, 1);
+            direction.applyEuler(sensor.pivot.rotation);
+
+            // 바닥(Y=0)을 향하는 방향 벡터 (Pitch가 음수일 때)
+            const pitchAngle = Math.abs(pitchRad); 
+
+            // 1. 바닥과의 거리 분석
+            let analysisText = `--- ${sensor.name} ---\n`;
+            
+            // Y축(수직) 성분과 Z축(전진) 성분
+            const dirY = direction.y; 
+            const dirZ_planar = Math.sqrt(direction.x * direction.x + direction.z * direction.z); // 수평 투영된 길이
+
+            // 센서가 수평 또는 위를 바라볼 경우 (dirY >= 0), 바닥과 교차하지 않음
+            if (dirY >= -0.001) { // 0 또는 양수 (수평 또는 위)
+                analysisText += `  ❌ 바닥과 교차하지 않음 (수평 또는 위쪽 지향)\n`;
+                sensor.floorIndicator.visible = false;
+                return analysisText;
+            }
+
+            // 2. 바닥까지의 수직 거리(H)를 이용한 계산
+            // 수직 방향 성분이 음수이므로 Math.abs(dirY) 사용
+            const distanceToFloor = sensorHeight / Math.abs(dirY); 
+            
+            // 바닥 평면상의 교차점 (센서 원점으로부터)
+            const intersectionPoint = new THREE.Vector3(
+                sensorPos.x + direction.x * distanceToFloor,
+                0, // Y=0
+                sensorPos.z + direction.z * distanceToFloor
+            );
+            
+            // 센서 위치(X, Z)에서 바닥 교차점까지의 수평 거리
+            const planarDistanceToFloor = Math.sqrt(
+                (intersectionPoint.x - sensorPos.x) ** 2 + (intersectionPoint.z - sensorPos.z) ** 2
+            );
+            
+            analysisText += `  * [직선 거리] 바닥까지의 거리: ${distanceToFloor.toFixed(3)} m\n`;
+            
+            // 3. FoV 경계 계산
+            const halfFoV = fovRad / 2;
+            
+            // 바닥을 향하는 각도가 FoV의 절반보다 작으면 (즉, 바닥을 바라보지만, 시야각 안에 바닥이 들어오지 않음)
+            if (pitchAngle < halfFoV) {
+                analysisText += `  ⚠️ FoV가 바닥을 완전히 덮지 않음 (Min Range 계산 불가)\n`;
+                sensor.floorIndicator.visible = false;
+                return analysisText;
+            }
+
+            // 최소 거리 (FoV 상단 경계선이 바닥과 만나는 지점)
+            const angleMin = pitchAngle - halfFoV;
+            const distanceMin = sensorHeight / Math.sin(angleMin);
+            const planarMin = sensorHeight / Math.tan(angleMin);
+            
+            // 최대 거리 (FoV 하단 경계선이 바닥과 만나는 지점)
+            const angleMax = pitchAngle + halfFoV;
+            const distanceMax = sensorHeight / Math.sin(angleMax);
+            const planarMax = sensorHeight / Math.tan(angleMax);
+
+            analysisText += `  * [직선 거리] 범위 최소 거리 (min) : ${distanceMin.toFixed(3)} m\n`;
+            analysisText += `  * [직선 거리] 범위 최대 거리 (MAX) : ${distanceMax.toFixed(3)} m\n`;
+            analysisText += '\n';
+            analysisText += `  * [수평 거리] 바닥까지의 거리: ${planarDistanceToFloor.toFixed(3)} m\n`;
+            analysisText += `  * [수평 거리] 범위 최소 거리 (min) : ${planarMin.toFixed(3)} m\n`;
+            analysisText += `  * [수평 거리] 범위 최대 거리 (MAX) : ${planarMax.toFixed(3)} m\n`;
+            
+            // 4. 바닥 가시화 업데이트
+            sensor.floorIndicator.visible = true;
+            
+            // 원형 가시화 (Min/Max 범위가 너무 넓거나 좁으면 가시화가 어려울 수 있음)
+            const maxRadius = planarMax;
+            
+            // 교차점 위치 (X, Z) 업데이트
+            sensor.floorIndicator.position.x = intersectionPoint.x;
+            sensor.floorIndicator.position.z = intersectionPoint.z;
+
+            // 원반 크기 조정
+            sensor.floorIndicator.scale.set(maxRadius, maxRadius, 1);
+
+            return analysisText;
+        }
+
+
+        // 센서 업데이트 함수
+        function updateSensors() {
+
+            // 로봇 반지름 변경 시 모델링도 업데이트
+            updateRobotBody();
+
+            // --- ToF A (Bottom) ---
+            tofA.pivot.position.set(params.tofA_x, params.tofA_y, params.tofA_z);
+            tofA.pivot.rotation.y = THREE.MathUtils.degToRad(params.tofA_yaw);
+            tofA.pivot.rotation.x = THREE.MathUtils.degToRad(params.tofA_pitch);
+            const rangeA = params.tofA_range;
+            const radiusA = rangeA * Math.tan(THREE.MathUtils.degToRad(params.tofA_fov) / 2);
+            tofA.fovMesh.scale.set(radiusA, radiusA, rangeA);
+            
+            // [추가] 시각화 활성화/비활성화
+            tofA.pivot.visible = params.tofA_visible;
+            if (!params.tofA_visible) tofA.floorIndicator.visible = false;
+
+
+            // --- Ultrasonic ---
+            ultra.pivot.position.set(params.ultra_x, params.ultra_y, params.ultra_z);
+            ultra.pivot.rotation.y = THREE.MathUtils.degToRad(params.ultra_yaw);
+            ultra.pivot.rotation.x = THREE.MathUtils.degToRad(params.ultra_pitch);
+            const rangeU = params.ultra_range;
+            const radiusU = rangeU * Math.tan(THREE.MathUtils.degToRad(params.ultra_fov) / 2);
+            ultra.fovMesh.scale.set(radiusU, radiusU, rangeU);
+
+            // [추가] 시각화 활성화/비활성화
+            ultra.pivot.visible = params.ultra_visible;
+            if (!params.ultra_visible) ultra.floorIndicator.visible = false;
+
+
+            // --- ToF B (Top) ---
+            tofB.pivot.position.set(params.tofB_x, params.tofB_y, params.tofB_z);
+            tofB.pivot.rotation.y = THREE.MathUtils.degToRad(params.tofB_yaw);
+            tofB.pivot.rotation.x = THREE.MathUtils.degToRad(params.tofB_pitch);
+            const rangeB = params.tofB_range;
+            const radiusB = rangeB * Math.tan(THREE.MathUtils.degToRad(params.tofB_fov) / 2);
+            tofB.fovMesh.scale.set(radiusB, radiusB, rangeB);
+
+            // [추가] 시각화 활성화/비활성화
+            tofB.pivot.visible = params.tofB_visible;
+            if (!params.tofB_visible) tofB.floorIndicator.visible = false;
+
+
+            // --- RGB 카메라 위치 업데이트 ---
+            const rgbCamY = 0.58 + ROBOT_GROUND_OFFSET;
+            rgbCamera.position.z = params.radiusTop + 0.01;
+
+            // [새 기능 1] 바닥 교차점 분석 결과 업데이트
+            let analysisOutput = '';
+            analysisOutput += ' <b>< "센서"로 부터의 거리로 표현 [m] ></b> \n';
+            analysisOutput += '<br>';
+            analysisOutput += analyzeFloorIntersection(tofA, 'tofA');
+            analysisOutput += '\n';
+            analysisOutput += analyzeFloorIntersection(ultra, 'ultra');
+            analysisOutput += '\n';
+            analysisOutput += analyzeFloorIntersection(tofB, 'tofB');
+            document.getElementById('analysis-output').innerHTML = analysisOutput;
+        }
+
+        // --- 새로운 기능: 설정값 추출 ---
+        const guiActions = {
+            exportParams: function() {
+                // ... (동일)
+                const jsonString = JSON.stringify(params, null, 4);
+                const outputArea = document.createElement('textarea');
+                outputArea.value = `// 복사 후 Object.assign(params, ...)에 붙여넣으세요.\n${jsonString}`;
+                // 스타일 및 위치 설정
+                outputArea.style.position = 'fixed';
+                outputArea.style.bottom = '10px';
+                outputArea.style.left = '10px';
+                outputArea.style.width = '400px';
+                outputArea.style.height = '300px';
+                outputArea.style.backgroundColor = '#1e1e1e';
+                outputArea.style.color = '#00ffcc';
+                outputArea.style.border = '1px solid #00ffcc';
+                outputArea.style.zIndex = '1000';
+                document.body.appendChild(outputArea);
+                alert("현재 설정값이 화면 좌측 하단에 생성되었습니다. 내용을 복사하여 코드의 'Object.assign(params, ...)' 부분에 붙여넣으세요.");
+            }
+        };
+        // -----------------------------------
+        
+        // 로봇 모델링 폴더
+        const f0 = gui.addFolder('0. 로봇 본체');
+        f0.add(params, 'radiusBottom', 0.1, 0.3).name('하단 반지름(m)').onChange(updateSensors);
+        f0.add(params, 'radiusMiddle', 0.1, 0.3).name('중단 반지름(m)').onChange(updateSensors);
+        f0.add(params, 'radiusTop', 0.1, 0.3).name('상단 반지름(m)').onChange(updateSensors);
+        f0.open();
+
+        // GUI 폴더 구성
+        const f1 = gui.addFolder('1. 바닥 감지 ToF (Red)');
+        f1.add(params, 'tofA_x', -0.3, 0.3).name('X 위치(m)').onChange(updateSensors);
+        f1.add(params, 'tofA_y', 0, ROBOT_MAX_H).name('Y 높이(m)').onChange(updateSensors);
+        f1.add(params, 'tofA_z', -0.3, 0.3).name('Z 위치(m)').onChange(updateSensors);
+        f1.add(params, 'tofA_yaw', -180, 180).name('YAW(deg)').onChange(updateSensors);
+        f1.add(params, 'tofA_pitch', -180, 180).name('PITCH(deg)').onChange(updateSensors);
+        f1.add(params, 'tofA_fov', 5, 90).name('FoV(deg)').onChange(updateSensors);
+        f1.add(params, 'tofA_range', 0.05, 10.0).name('표시 거리(m)').onChange(updateSensors);
+        f1.add(params, 'tofA_visible').name('시각화 활성화').onChange(updateSensors); // [추가] 체크박스
+
+
+        const f2 = gui.addFolder('2. 하단 초음파 (Green)');
+        f2.add(params, 'ultra_x', -0.3, 0.3).name('X 위치(m)').onChange(updateSensors);
+        f2.add(params, 'ultra_y', 0, ROBOT_MAX_H).name('Y 높이(m)').onChange(updateSensors);
+        f2.add(params, 'ultra_z', -0.3, 0.3).name('Z 위치(m)').onChange(updateSensors);
+        f2.add(params, 'ultra_yaw', -180, 180).name('YAW(deg)').onChange(updateSensors);
+        f2.add(params, 'ultra_pitch', -180, 180).name('PITCH(deg)').onChange(updateSensors);
+        f2.add(params, 'ultra_fov', 5, 90).name('FoV(deg)').onChange(updateSensors);
+        f2.add(params, 'ultra_range', 0.1, 10.0).name('표시 거리(m)').onChange(updateSensors);
+        f2.add(params, 'ultra_visible').name('시각화 활성화').onChange(updateSensors); // [추가] 체크박스
+
+
+        const f3 = gui.addFolder('3. 상단 ToF (Blue)');
+        f3.add(params, 'tofB_x', -0.3, 0.3).name('X 위치(m)').onChange(updateSensors);
+        f3.add(params, 'tofB_y', 0, ROBOT_MAX_H).name('Y 높이(m)').onChange(updateSensors);
+        f3.add(params, 'tofB_z', -0.3, 0.3).name('Z 위치(m)').onChange(updateSensors);
+        f3.add(params, 'tofB_yaw', -180, 180).name('YAW(deg)').onChange(updateSensors);
+        f3.add(params, 'tofB_pitch', -180, 180).name('PITCH(deg)').onChange(updateSensors);
+        f3.add(params, 'tofB_fov', 5, 90).name('FoV(deg)').onChange(updateSensors);
+        f3.add(params, 'tofB_range', 0.1, 10.0).name('표시 거리(m)').onChange(updateSensors);
+        f3.add(params, 'tofB_visible').name('시각화 활성화').onChange(updateSensors); // [추가] 체크박스
+
+        // --- GUI 상단에 코드 생성 버튼 추가 ---
+        gui.add(guiActions, 'exportParams').name('현재 설정값 코드 생성');
+
+
+        f1.open(); f2.open(); f3.open();
+
+        // 초기 실행
+        updateSensors();
+
+        // 윈도우 리사이즈 대응
+        window.addEventListener('resize', onWindowResize, false);
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // 애니메이션 루프
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+        
+        
+        // ============================================
+        // [새 기능 2] 더블 클릭 측정 로직
+        // ============================================
+        const raycaster = new THREE.Raycaster();
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // Y=0 평면
+        const pointer = new THREE.Vector2();
+        
+        // 측정 지점 가시화
+        const pointGeo = new THREE.SphereGeometry(0.03, 16, 16);
+        const pointMat = new THREE.MeshBasicMaterial({ color: 0xffff00 });
+        const measurementPoint = new THREE.Mesh(pointGeo, pointMat);
+        measurementPoint.position.y = 0.005; 
+        measurementPoint.visible = false;
+        scene.add(measurementPoint);
+
+        window.addEventListener('dblclick', onDoubleClick, false);
+
+        function onDoubleClick(event) {
+            // 마우스 위치 정규화 (-1에서 1)
+            pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
+            pointer.y = - (event.clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(pointer, camera);
+            
+            // Ray와 Y=0 평면의 교차점 계산
+            const intersection = new THREE.Vector3();
+            if (raycaster.ray.intersectPlane(plane, intersection)) {
+                
+                // 1. 측정 지점 가시화 업데이트
+                measurementPoint.position.x = intersection.x;
+                measurementPoint.position.z = intersection.z;
+                measurementPoint.visible = true;
+                
+                // 2. 센서별 거리 계산
+                let output = `--- 측정 결과 ---\n`;
+                output += `측정 지점 (X, Z): (${intersection.x.toFixed(3)}, ${intersection.z.toFixed(3)}) m\n`;
+                output += `---------------------\n`;
+
+                sensors.forEach(sensor => {
+                    // 센서의 절대 위치 계산 (로봇 그룹의 회전/이동이 없으므로 pivot 위치만 사용)
+                    const sensorAbsPos = new THREE.Vector3();
+                    sensor.pivot.getWorldPosition(sensorAbsPos);
+
+                    // 센서와 측정 지점 간의 3D 거리
+                    const distance = sensorAbsPos.distanceTo(intersection);
+                    
+                    // 센서의 시야각 안에 있는지 확인하는 로직 (생략: 복잡)
+                    // 현재는 '거리'만 제공
+
+                    output += `${sensor.name}: ${distance.toFixed(3)} m\n`;
+                });
+
+                // 3. 결과 출력
+                document.getElementById('measurement-output').textContent = output;
+
+            } else {
+                document.getElementById('measurement-output').textContent = "측정 실패: 바닥 평면을 벗어났습니다.";
+            }
+        }
+    </script>
+</body>
+</html>
