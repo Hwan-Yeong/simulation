@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
 import { RobotModel } from './RobotModel.js';
 import { SensorVisualizer } from './SensorVisualizer.js';
+import { SensorAnalysis } from './SensorAnalysis.js';
 import { analyzeFloorIntersection } from './utils/analysis.js';
 
 export class RobotSimulator {
@@ -10,6 +11,14 @@ export class RobotSimulator {
         this.container = container;
         this.params = this._getInitialParams();
         this.sensors = [];
+
+        this.analysisData = {
+            tofA_res: '업데이트 대기 중...',
+            ultra_res: '업데이트 대기 중...',
+            tofB_res: '업데이트 대기 중...'
+        };
+        this.analysisControllers = {};
+
         this.raycaster = new THREE.Raycaster();
         this.pointer = new THREE.Vector2();
         this.plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -119,22 +128,32 @@ export class RobotSimulator {
 
     // 센서 업데이트 및 분석
     updateSensors = () => {
-        // 로봇 모델 업데이트 (높이/반지름 변경 반영)
+        // 1. 물리/시각화 업데이트
         this.robotModel.updateBody();
-
-        // 각 센서 업데이트
         this.tofA.update(this.params, 'tofA');
         this.ultra.update(this.params, 'ultra');
         this.tofB.update(this.params, 'tofB');
 
-        // 분석 결과 업데이트
-        let analysisOutput = ' <b>< "센서"로 부터의 거리로 표현 [m] ></b> \n<br>';
-        analysisOutput += analyzeFloorIntersection(this.tofA, this.params, 'tofA');
-        analysisOutput += '\n';
-        analysisOutput += analyzeFloorIntersection(this.ultra, this.params, 'ultra');
-        analysisOutput += '\n';
-        analysisOutput += analyzeFloorIntersection(this.tofB, this.params, 'tofB');
-        document.getElementById('analysis-output').innerHTML = analysisOutput;
+        // 2. 분석 데이터 계산 및 텍스트 정제
+        const cleanText = (text) => text.replace(/<br>|<b>|<\/b>/g, "").trim();
+        this.analysisData.tofA_res = cleanText(analyzeFloorIntersection(this.tofA, this.params, 'tofA'));
+        this.analysisData.ultra_res = cleanText(analyzeFloorIntersection(this.ultra, this.params, 'ultra'));
+        this.analysisData.tofB_res = cleanText(analyzeFloorIntersection(this.tofB, this.params, 'tofB'));
+
+        // 3. 실시간 팝업창 업데이트 (창이 열려있을 때만)
+        if (SensorAnalysis.activeId) {
+            const configs = [
+                { id: 'tofA', name: 'ToF Bottom (Red)', dataKey: 'tofA_res' },
+                { id: 'ultra', name: 'Ultrasonic (Green)', dataKey: 'ultra_res' },
+                { id: 'tofB', name: 'ToF Top (Blue)', dataKey: 'tofB_res' }
+            ];
+
+            const activeConfig = configs.find(c => c.name === SensorAnalysis.activeId);
+            if (activeConfig) {
+                const fullReport = this._generateFullReport(activeConfig);
+                SensorAnalysis.update(activeConfig.name, fullReport);
+            }
+        }
     }
 
     _setupGUI() {
@@ -146,6 +165,30 @@ export class RobotSimulator {
         f0.add(this.params, 'radiusMiddle', 0.1, 0.3).name('중단 반지름(m)').onChange(this.updateSensors);
         f0.add(this.params, 'radiusTop', 0.1, 0.3).name('상단 반지름(m)').onChange(this.updateSensors);
         f0.open();
+
+        const fResult = this.gui.addFolder('실시간 분석 결과');
+
+        const analysisActions = {
+            showTofA: () => {
+                const config = { id: 'tofA', name: 'ToF Bottom (Red)', dataKey: 'tofA_res' };
+                SensorAnalysis.toggle(config.name, this._generateFullReport(config));
+            },
+            showUltra: () => {
+                const config = { id: 'ultra', name: 'Ultrasonic (Green)', dataKey: 'ultra_res' };
+                SensorAnalysis.toggle(config.name, this._generateFullReport(config));
+            },
+            showTofB: () => {
+                const config = { id: 'tofB', name: 'ToF Top (Blue)', dataKey: 'tofB_res' };
+                SensorAnalysis.toggle(config.name, this._generateFullReport(config));
+            }
+        };
+
+        // 기존의 disable 필드 대신 버튼을 추가합니다.
+        fResult.add(analysisActions, 'showTofA').name('🔍 ToF Bottom 분석 결과 보기');
+        fResult.add(analysisActions, 'showUltra').name('🔍 Ultrasonic 분석 결과 보기');
+        fResult.add(analysisActions, 'showTofB').name('🔍 ToF Top 분석 결과 보기');
+
+        fResult.open();
 
         const sensorMaxY = 1.0;
 
@@ -195,6 +238,54 @@ export class RobotSimulator {
     _setupEvents() {
         window.addEventListener('resize', this.onWindowResize);
         window.addEventListener('dblclick', this.onDoubleClick);
+    }
+
+    // 공통 리포트 생성 함수 (중복 제거 및 포맷 통일)
+    _generateFullReport(config) {
+        const resultText = this.analysisData[config.dataKey];
+        return `
+            ${resultText}
+            --- 장치 정보 ---
+            * [좌표] ${this.params[config.id+'_x'].toFixed(3)}, ${this.params[config.id+'_y'].toFixed(3)}, ${this.params[config.id+'_z'].toFixed(3)}
+            * [각도] Yaw: ${this.params[config.id+'_yaw']}°, Pitch: ${this.params[config.id+'_pitch']}°
+            * [감지 범위] ${this.params[config.id+'_range'].toFixed(2)}m, ${this.params[config.id+'_fov']}°
+            * [갱신 시간] ${new Date().toLocaleTimeString()}
+        `;
+    }
+
+    _createFolderButtons(container) {
+        const sensorConfigs = [
+            { id: 'tofA', name: 'ToF Bottom (Red)', dataKey: 'tofA_res' },
+            { id: 'ultra', name: 'Ultrasonic (Green)', dataKey: 'ultra_res' },
+            { id: 'tofB', name: 'ToF Top (Blue)', dataKey: 'tofB_res' }
+        ];
+
+        sensorConfigs.forEach(config => {
+            const btn = document.createElement('button');
+            btn.innerText = `🔍 ${config.name} 분석 결과 보기`;
+            btn.style.cssText = `
+                width: 100%;
+                padding: 6px;
+                background: #333;
+                color: #00ffcc;
+                border: 1px solid #00ffcc;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 11px;
+                font-weight: bold;
+                transition: 0.2s;
+            `;
+
+            btn.onmouseover = () => { btn.style.background = "#00ffcc"; btn.style.color = "#000"; };
+            btn.onmouseout = () => { btn.style.background = "#333"; btn.style.color = "#00ffcc"; };
+
+            btn.onclick = () => {
+                const fullReport = this._generateFullReport(config);
+                SensorAnalysis.toggle(config.name, fullReport);
+            };
+
+            container.appendChild(btn);
+        });
     }
 
     onWindowResize = () => {
